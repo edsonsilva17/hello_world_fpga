@@ -1,6 +1,6 @@
 # blink: hello world na Colorlight i9
 
-Um LED que pisca a cada 0,67 s. É o menor projeto que passa pelo fluxo inteiro de FPGA: escrever o hardware, simular, sintetizar, posicionar e rotear, gerar o bitstream e gravar na placa.
+Um LED que pisca a 1 Hz exato (0,5 s aceso, 0,5 s apagado). É o menor projeto que passa pelo fluxo inteiro de FPGA: escrever o hardware, simular, sintetizar, posicionar e rotear, gerar o bitstream e gravar na placa.
 
 - **Placa:** Colorlight i9 com a placa de extensão (gravador DAPLink CMSIS-DAP).
 - **FPGA:** Lattice ECP5 **LFE5U-45F-6BG381C** (idcode `0x41112043`).
@@ -66,7 +66,7 @@ cd build && vvp -n sim
 
 - **`iverilog`** compila o testbench e o circuito num executável. `-Wall` liga todos os avisos e `-o` dá o nome da saída.
 - **`vvp`** executa a simulação. Os `$display` aparecem no terminal, e o `$dumpfile` cria o `blink.vcd`.
-- **O que conferir:** `led_n` alterna a cada 320 ns (t = 0, 300, 620, 940…). Com `N = 4` no testbench, o bit 3 do contador troca a cada 8 ciclos de 40 ns.
+- **O que conferir:** `led_n` alterna a cada 320 ns (t = 0, 300, 620, 940…). Com `CLK_HZ = 16` no testbench, `LIMITE = 8`: o LED inverte a cada 8 ciclos de 40 ns.
 
 ### 2. Sintetizar
 
@@ -77,9 +77,9 @@ yosys -p "synth_ecp5 -top blink -json build/blink.json" blink.v
 - **`yosys`** lê o Verilog e o transforma em peças que existem dentro do ECP5.
 - **`synth_ecp5`** é a receita de síntese para essa família de chips. **`-top blink`** diz qual módulo é o de cima, e **`-json`** diz onde salvar a netlist.
 - **O que conferir** no resumo final ("Printing statistics"):
-  - `25 TRELLIS_FF`: os 25 flip-flops do contador, um por bit.
-  - `13 CCU2C`: a cadeia de carry do somador `+1`; cada CCU2C soma 2 bits.
-  - `2 LUT4`: lógica restante, incluindo o NOT do LED.
+  - `25 TRELLIS_FF`: 24 flip-flops do contador, um por bit, mais 1 do registrador `led`.
+  - `12 CCU2C`: a cadeia de carry do somador `+1`; cada CCU2C soma 2 bits.
+  - `11 LUT4` e `2 PFUMX`: a comparação `contador == LIMITE - 1`, o zerar do contador e o NOT do LED.
 
   Se aparecerem muito mais ou muito menos peças do que você esperava, algo no Verilog não está descrevendo o que você pensou.
 
@@ -95,7 +95,7 @@ nextpnr-ecp5 --45k --package CABGA381 --speed 6 \
 - **`--lpf`** traz os pinos e o clock. **`--textcfg`** é o arquivo de saída.
 - **O que conferir:**
   - `TRELLIS_FF: 25/43848 0%`: quanto do chip foi usado.
-  - `Max frequency for clock ...: 311.82 MHz (PASS at 25.00 MHz)`: o caminho mais lento entre dois flip-flops aguenta 311 MHz. O clock é de 25 MHz, então sobra muita margem. Se aparecer `FAIL`, o circuito pode se comportar errado na placa.
+  - `Max frequency for clock ...: 242.07 MHz (PASS at 25.00 MHz)`: o caminho mais lento entre dois flip-flops aguenta 242 MHz. O clock é de 25 MHz, então sobra muita margem. Se aparecer `FAIL`, o circuito pode se comportar errado na placa.
 
 ### 4. Gerar o bitstream
 
@@ -122,30 +122,46 @@ openFPGALoader -b colorlight-i5 build/blink.bit
 Verilog **descreve hardware**. Ele não é executado linha a linha: cada trecho vira um pedaço de circuito, e todos funcionam ao mesmo tempo.
 
 ```verilog
-module blink #(parameter N = 25) (   // componente "blink", com uma constante N configurável
-    input  wire clk,                 // clock de 25 MHz
-    output wire led_n                // LED, aceso em nível baixo (_n = ativo em 0)
+module blink #(
+    parameter CLK_HZ   = 25_000_000,  // constantes configuráveis na instância
+    parameter PISCA_HZ = 1
+) (
+    input  wire clk,                  // clock de 25 MHz
+    output wire led_n                 // LED, aceso em nível baixo (_n = ativo em 0)
 );
-    reg [N-1:0] contador = 0;        // N bits; o "= 0" é carregado pelo bitstream ao ligar
+    localparam LIMITE = CLK_HZ / (2 * PISCA_HZ);   // calculado; não pode ser trocado de fora
 
-    always @(posedge clk)            // a cada subida do clock: vira flip-flops
-        contador <= contador + 1;    // somador; "<=" atualiza todos os flip-flops juntos
+    reg [$clog2(LIMITE)-1:0] contador = 0;  // bits suficientes para 0..LIMITE-1
+    reg                      led      = 0;  // o "= 0" é carregado pelo bitstream ao ligar
 
-    assign led_n = ~contador[N-1];   // lógica combinacional: o bit mais alto, invertido
+    always @(posedge clk) begin             // a cada subida do clock: vira flip-flops
+        if (contador == LIMITE - 1) begin   // fim do meio período
+            contador <= 0;
+            led      <= ~led;               // inverte o LED
+        end else begin
+            contador <= contador + 1;       // "<=" atualiza todos os flip-flops juntos
+        end
+    end
+
+    assign led_n = ~led;                    // lógica combinacional: o LED, invertido
 endmodule
 ```
 
 O hardware que sai disso:
 
 ```
-          ┌──────────────┐  Q (25 bits)
- clk ───▶ │ 25 flip-flops├──────┬──────────▶ bit 24 ──▶ [NOT] ──▶ pino L2 (LED)
-          └──────▲───────┘      │
-                 │ D            ▼
-                 └─────────── [ +1 ]
+              ┌──────────────────────────────────────┐
+              │ D                                    │
+          ┌───┴──────────┐  Q (24 bits)              │
+ clk ───▶ │ 24 flip-flops├──┬──▶ [ +1 ] ──▶ [ MUX ] ─┘
+          └──────────────┘  │                  ▲ escolhe 0 quando "fim"
+                            ▼                  │
+                     [ == LIMITE-1 ? ] ── fim ─┴──▶ inverte ──▶ [ FF led ] ──▶ [NOT] ──▶ pino L2 (LED)
 ```
 
-- O bit *k* de um contador troca a cada 2ᵏ ciclos. Com o bit 24: 2²⁴ ÷ 25 MHz ≈ 0,67 s aceso e 0,67 s apagado.
+- `LIMITE = 25.000.000 / 2 = 12.500.000` ciclos em cada estado. A 40 ns por ciclo, são 0,5 s exatos aceso e 0,5 s apagado: 1 Hz.
+- Para outra frequência, troque só `PISCA_HZ`. Ela é exata quando `CLK_HZ / (2 × PISCA_HZ)` dá um número inteiro.
+- Com `begin ... end`, o `always` pode ter vários comandos. A indentação é só visual: sem `begin/end`, apenas o primeiro comando ficaria dentro do `always`.
 - **`reg`** não quer dizer automaticamente registrador. Ele vira flip-flop porque é atualizado dentro de `always @(posedge clk)`.
 - **Regra:** em `always @(posedge clk)`, use `<=`.
 - O `= 0` só funciona em FPGA. Num chip ASIC, seria preciso um sinal de reset.
@@ -173,7 +189,13 @@ module tb_blink;                   // sem portas: é o nível mais alto da simul
     reg  clk = 0;                  // reg: o testbench dá o valor. Sem "= 0", começa em x e nunca oscila
     wire led_n;                    // wire: quem dá o valor é o circuito
 
-    blink #(.N(4)) dut (.clk(clk), .led_n(led_n));  // instância do circuito, com N trocado para 4
+    blink #(                       // instância do circuito: .PARAMETRO(valor)
+        .CLK_HZ  (16),             // clock "de mentira" para a conta: LIMITE = 8
+        .PISCA_HZ(1)
+    ) dut (
+        .clk  (clk),               // .porta_do_modulo(sinal_do_testbench)
+        .led_n(led_n)
+    );
 
     always #20 clk = ~clk;         // 20 ns em 0 e 20 ns em 1 = período de 40 ns = 25 MHz
 
@@ -190,7 +212,8 @@ endmodule
 ```
 
 - Atrasos (`#20`) e funções com `$` só existem no simulador e não viram hardware.
-- **Por que `N = 4`?** Com 25 bits, o LED só mudaria depois de 16 milhões de ciclos, e a simulação ficaria lenta e com um arquivo enorme. A lógica é a mesma; só a escala muda. É para isso que existe o `parameter`.
+- **Por que `CLK_HZ = 16`?** Com o valor real, o LED só mudaria depois de 12,5 milhões de ciclos, e a simulação ficaria lenta e com um arquivo enorme. A lógica é a mesma; só a escala muda. É para isso que existe o `parameter`. O clock do testbench continua com 40 ns: o `CLK_HZ` só entra na conta do `LIMITE`.
+- **Por que `40*64`?** 40 ns por ciclo × 64 ciclos. Cada piscada leva 16 ciclos, então dá para ver 4 piscadas.
 - **`%0d` e não `%0t`:** o `%t` imprime o tempo na precisão do `timescale` (ps) e mostraria "300000". Já o `$time` devolve o valor na unidade do módulo (ns), então `%0d` mostra "300".
 
 ## Pinos da Colorlight i9 usados até agora
@@ -214,6 +237,6 @@ Os pinos da UART do i9 ainda não foram conferidos. Eles são diferentes dos do 
 
 ## Próximos desafios
 
-1. Fazer o LED piscar a cerca de 2 Hz: calcular o bit antes de testar.
+1. Fazer o LED piscar a 2 Hz mudando só `PISCA_HZ`: prever na simulação os novos tempos de troca antes de gravar.
 2. LED "respirando" com PWM.
 3. Testbench que confere sozinho o número de ciclos entre as trocas e acusa erro.

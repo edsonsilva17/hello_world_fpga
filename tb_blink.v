@@ -5,8 +5,13 @@ module tb_blink;            // sem portas: o tb é o "mundo" inteiro
     reg  clk = 0;           // reg: o tb dá o valor
     wire led_n;             // wire: quem dá o valor é o circuito testado
 
-    // instancia o circuito (DUT, "device under test") com N=4
-    blink #(.N(4)) dut (
+    // instancia o circuito (DUT, "device under test").
+    // CLK_HZ "de mentira" = 16: LIMITE = 16/2 = 8 ciclos por estado,
+    // para a simulação ficar curta (o clock real do tb continua 40 ns).
+    blink #(
+        .CLK_HZ  (16),
+        .PISCA_HZ(1)
+    ) dut (
         .clk  (clk),
         .led_n(led_n)
     );
