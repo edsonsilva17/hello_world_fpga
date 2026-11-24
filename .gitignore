@@ -1,0 +1,9 @@
+# Tudo o que o build.sh gera (pode ser recriado com ./build.sh)
+build/
+
+# Saídas soltas de rodar os comandos à mão fora de build/
+*.json
+*.config
+*.bit
+*.vcd
+sim
